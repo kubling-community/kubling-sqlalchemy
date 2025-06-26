@@ -182,6 +182,112 @@ class KublingDialect(PGDialect):
     def get_check_constraints(self, connection, table_name, schema=None, **kw):
         return []
 
+    @reflection.cache
+    def get_pk_constraint(self, connection, table_name, schema=None, **kw):
+        pk_query = text("""
+            SELECT Name, ColPositions
+            FROM SYS.Keys
+            WHERE Type = 'Primary'
+              AND TableName = :table_name
+              AND SchemaName = :schema
+        """)
+        pk_result = connection.execute(pk_query, {
+            "table_name": table_name,
+            "schema": schema or "public"
+        }).mappings()
+
+        pk_row = next(pk_result, None)
+        if not pk_row:
+            return {"constrained_columns": [], "name": None}
+
+        col_positions = pk_row["ColPositions"]
+        if not col_positions:
+            return {"constrained_columns": [], "name": pk_row["Name"]}
+
+        col_query = text("""
+            SELECT Name
+            FROM SYS.Columns
+            WHERE TableName = :table_name AND SchemaName = :schema
+        """)
+        col_result = connection.execute(col_query, {
+            "table_name": table_name,
+            "schema": schema or "public"
+        }).mappings()
+
+        column_names = [row["Name"] for row in col_result]
+        pos_to_name = {i + 1: name for i, name in enumerate(column_names)}
+
+        constrained_columns = [
+            pos_to_name.get(pos) for pos in col_positions if pos in pos_to_name
+        ]
+
+        return {
+            "constrained_columns": constrained_columns,
+            "name": pk_row["Name"]
+        }
+
+    @reflection.cache
+    def get_unique_constraints(self, connection, table_name, schema=None, **kw):
+        query = text("""
+            SELECT Name, ColPositions
+            FROM SYS.Keys
+            WHERE Type = 'Unique'
+              AND TableName = :table_name
+              AND SchemaName = :schema
+        """)
+        result = connection.execute(query, {
+            "table_name": table_name,
+            "schema": schema or "public"
+        }).mappings()
+
+        col_query = text("""
+            SELECT Name
+            FROM SYS.Columns
+            WHERE TableName = :table_name AND SchemaName = :schema
+        """)
+        col_result = connection.execute(col_query, {
+            "table_name": table_name,
+            "schema": schema or "public"
+        }).mappings()
+        column_names = [row["Name"] for row in col_result]
+        pos_to_name = {i + 1: name for i, name in enumerate(column_names)}
+
+        constraints = []
+        for row in result:
+            cols = [pos_to_name.get(pos) for pos in row["ColPositions"] if pos in pos_to_name]
+            constraints.append({
+                "name": row["Name"],
+                "column_names": cols,
+            })
+        return constraints
+
+    @reflection.cache
+    def get_table_comment(self, connection, table_name, schema=None, **kw):
+        query = text("""
+            SELECT Description
+            FROM SYS.Tables
+            WHERE Name = :table_name AND SchemaName = :schema
+        """)
+        result = connection.execute(query, {
+            "table_name": table_name,
+            "schema": schema or "public"
+        }).mappings()
+        row = next(result, None)
+        return {"text": row["Description"] if row and row["Description"] else None}
+
+    def has_table(self, connection, table_name, schema=None):
+        query = text("""
+            SELECT 1
+            FROM SYS.Tables
+            WHERE Name = :table_name AND SchemaName = :schema
+        """)
+        result = connection.execute(query, {
+            "table_name": table_name,
+            "schema": schema or "public"
+        }).scalar()
+        return bool(result)
+
+
 # Register the Kubling dialect
 from sqlalchemy.dialects import registry
 

@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="kubling_sqlalchemy",
-    version="24.5.4",
+    version="25.1",
     description="SQLAlchemy dialect for Kubling",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",

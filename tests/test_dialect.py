@@ -2,12 +2,15 @@ import pytest
 from sqlalchemy import create_engine, inspect
 from kubling.dialect import KublingDialect
 
+
 @pytest.fixture
 def engine():
     return create_engine("kubling://sa:sa@127.0.0.1:35432/EmptyVDB")
 
+
 def test_dbapi():
     print(KublingDialect.dbapi())
+
 
 def test_dialect_registration():
     assert KublingDialect.name == "kubling"
@@ -30,6 +33,7 @@ def test_column_metadata(engine):
         assert "type" in column
         print("Column:", column)
 
+
 def test_foreign_keys(engine):
     inspector = inspect(engine)
     inspector.get_temp_view_names()
@@ -42,3 +46,39 @@ def test_foreign_keys(engine):
         assert "referred_table" in fk
         assert "referred_columns" in fk
         print("Column:", fk)
+
+
+def test_primary_key_constraint(engine):
+    inspector = inspect(engine)
+    pk = inspector.get_pk_constraint(table_name="Procedures", schema="SYS")
+
+    assert isinstance(pk, dict)
+    assert "constrained_columns" in pk
+    assert isinstance(pk["constrained_columns"], list)
+    assert len(pk["constrained_columns"]) > 0, "Could not find PK"
+
+    assert "name" in pk
+    assert isinstance(pk["name"], str) or pk["name"] is None
+
+    print("PK:", pk)
+
+
+def test_table_comment(engine):
+    inspector = inspect(engine)
+    comment = inspector.get_table_comment(table_name="Procedures", schema="SYS")
+
+    assert isinstance(comment, dict)
+    assert "text" in comment
+    assert comment["text"] is None or isinstance(comment["text"], str)
+
+
+def test_has_table(engine):
+    inspector = inspect(engine)
+
+    exists = inspector.dialect.has_table(engine.connect(), table_name="Procedures", schema="SYS")
+    assert isinstance(exists, bool)
+    assert exists is True, "Table 'Procedures' should exist."
+
+    not_exists = inspector.dialect.has_table(engine.connect(), table_name="Fake123", schema="SYS")
+    assert isinstance(not_exists, bool)
+    assert not_exists is False
