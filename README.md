@@ -103,6 +103,7 @@ Alternatively, you can use the pre-built Docker image that includes the Kubling 
 
 3. Access Superset:
    - Open your browser and go to [http://localhost:8088](http://localhost:8088).
+   - Login using `admin` as the username and password.
 
 4. Add a new database connection in Superset:
    - Use the same connection string format as described above:
