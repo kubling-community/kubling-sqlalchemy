@@ -172,17 +172,16 @@ SQLAlchemy `NullType` warning instead of being assigned an unsafe conversion.
 
 ## Current limits
 
-- SQLAlchemy 1.4 and the former PostgreSQL transport are no longer supported.
+- Compatibility follows the dependency ranges in the package metadata; the former PostgreSQL transport is no longer supported.
 - A connection has one active result stream; server-side cursors are not exposed.
 - `RETURNING`, multi-value inserts, sequences and identity columns are disabled.
 - DDL support depends on the source behind the VDB. The dialect does not emulate it.
 - SQLAlchemy ORM has not been validated separately.
-- Superset support requires its SQLAlchemy 2 line. Released versions through 6.1
-  still use SQLAlchemy 1.4 and cannot install this package.
+- Superset support requires a release compatible with this package's SQLAlchemy dependency range.
 
 ## Development
 
-Install the project and its development tools in a Python 3.10+ virtual
+Install the project and its development tools in a supported Python virtual
 environment:
 
 ```bash
