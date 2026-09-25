@@ -1,0 +1,124 @@
+name: Python package
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing vX.Y.Z tag to validate or publish'
+        required: true
+        type: string
+      publish:
+        description: 'Publish this release to PyPI'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install test and packaging tools
+        run: |
+          python -m pip install -r requirements-build.txt
+          python -m pip install -e '.[dev]'
+      - name: Validate version
+        run: python tools/check_release.py all
+      - id: source
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Validate release tag
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          python tools/check_release.py tag "$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor HEAD origin/master
+      - name: Test
+        run: python -m pytest
+      - name: Build and inspect distributions
+        run: |
+          python -m build
+          python -m twine check --strict dist/*
+          python tools/check_packages.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions-${{ steps.source.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+
+  validate:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ['3.10', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-distributions-${{ needs.build.outputs.version }}
+          path: dist
+      - name: Install wheel
+        run: |
+          wheel=(dist/*.whl)
+          python -m pip install "${wheel[0]}" 'pytest>=8.3,<9'
+      - name: Test installed wheel outside the source tree
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -c 'from importlib.metadata import version; from sqlalchemy import create_engine; import kubling.v1.command_pb2, kubling_sqlalchemy; assert version("kubling-sqlalchemy") == "${{ needs.build.outputs.version }}"; engine = create_engine("kubling+grpc://u:p@localhost:55051/vdb?vdb_version=1&insecure=true"); assert engine.dialect.name == "kubling"; engine.dispose()'
+          python -m pytest "$GITHUB_WORKSPACE/tests/contract" "$GITHUB_WORKSPACE/tests/unit"
+      - name: Reinstall from source distribution
+        run: |
+          python -m pip uninstall -y kubling-sqlalchemy
+          python -m pip install dist/*.tar.gz
+      - name: Smoke-test source distribution
+        working-directory: ${{ runner.temp }}
+        run: python -c 'from importlib.metadata import version; import kubling.v1.command_pb2, kubling_sqlalchemy; assert version("kubling-sqlalchemy") == "${{ needs.build.outputs.version }}"'
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: [build, validate]
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/kubling-sqlalchemy/
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-distributions-${{ needs.build.outputs.version }}
+          path: dist
+      - name: Publish tested distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          attestations: false

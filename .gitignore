@@ -69,3 +69,5 @@ test-results/
 
 .DS_Store
 Thumbs.db
+# Personal local probe (not part of the package)
+/kubling/conn_test.py

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kubling-sqlalchemy"
+version = "26.2.0"
+description = "SQLAlchemy dialect for Kubling"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "SQLAlchemy>=2.0.36,<2.1",
+    "kubling-grpc[status]==1.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2,<2",
+    "pytest>=8.3,<9",
+]
+
+[project.urls]
+Homepage = "https://github.com/kubling-community/kubling-sqlalchemy"
+Repository = "https://github.com/kubling-community/kubling-sqlalchemy"
+Issues = "https://github.com/kubling-community/kubling-sqlalchemy/issues"
+
+[project.entry-points."sqlalchemy.dialects"]
+kubling = "kubling_sqlalchemy.dialect:KublingDialect"
+"kubling.grpc" = "kubling_sqlalchemy.dialect:KublingDialect"
+
+[tool.setuptools.packages.find]
+include = ["kubling_sqlalchemy", "kubling_sqlalchemy.*"]
+namespaces = false
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["--import-mode=importlib", "--strict-config", "--strict-markers"]
+markers = [
+    "integration: requires --integration and a configured Kubling test instance",
+]

@@ -1,0 +1,4 @@
+global-exclude *
+include LICENSE README.md RELEASING.md VERSION MANIFEST.in pyproject.toml setup.py
+include requirements.txt requirements-build.txt
+recursive-include kubling_sqlalchemy *.py
