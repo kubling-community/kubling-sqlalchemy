@@ -4,7 +4,7 @@
 ![PyPI](https://img.shields.io/pypi/v/kubling-sqlalchemy?style=flat-square)
 [![Contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen?style=flat-square)](#contributing)
 
-`kubling-sqlalchemy` connects SQLAlchemy 2 applications to Kubling through its
+`kubling-sqlalchemy` connects SQLAlchemy applications to Kubling through its
 native client gRPC API. It includes a synchronous DB-API 2.0 driver and a Kubling
 SQL compiler. The published `kubling-grpc` package supplies the protocol bindings.
 
@@ -12,21 +12,15 @@ The current scope covers SQLAlchemy Core queries, parameter binding, result
 streaming, basic writes, explicit transactions, autocommit, connection pooling and
 catalog reflection. Apache Superset integration belongs to its own project.
 
-Version 26.2 replaces the old PostgreSQL/psycopg2 transport. Existing URLs must be
-updated with the gRPC endpoint, the VDB version and, for local plaintext servers,
-`insecure=true`.
+The native gRPC driver replaces the old PostgreSQL/psycopg2 transport. Existing
+URLs must include the gRPC endpoint, the VDB version and, for local plaintext
+servers, `insecure=true`.
 
-| Component | Supported version |
-| --- | --- |
-| Python | 3.10–3.14 |
-| SQLAlchemy | 2.0.36–2.0.x |
-| `kubling-grpc` | 1.1.1 |
-| Kubling server | Verified with 26.2-RC5 |
-| Apache Superset | Verified with the 7.0 development line; 6.1 and older are incompatible |
+Supported Python and dependency ranges are defined in `pyproject.toml` and the
+published package metadata. The integration examples track the current public
+Kubling and Apache Superset releases.
 
 ## Installation
-
-Python 3.10 or newer is required.
 
 ```bash
 python -m pip install kubling-sqlalchemy
