@@ -105,10 +105,18 @@ class FakeSession:
         transaction_id,
         batch_size,
         accepted_features,
+        allow_partial_results,
     ):
         values = tuple(parameters)
         self.execute_calls.append(
-            (sql, values, transaction_id, batch_size, frozenset(accepted_features))
+            (
+                sql,
+                values,
+                transaction_id,
+                batch_size,
+                frozenset(accepted_features),
+                allow_partial_results,
+            )
         )
         state = (
             TransactionStatus(transaction_id, transaction_pb2.TRANSACTION_STATE_ACTIVE)
@@ -293,6 +301,7 @@ def test_query_fetches_incrementally_and_exposes_lossless_metadata(resources):
                     features.LOB_READ_V1,
                 }
             ),
+            False,
         )
     ]
     assert cursor.description == (

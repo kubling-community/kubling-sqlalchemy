@@ -15,6 +15,7 @@ from kubling.v1 import (
     lob_pb2_grpc,
     transaction_pb2,
     value_pb2,
+    warning_pb2,
 )
 
 from kubling_sqlalchemy.transport import (
@@ -46,6 +47,7 @@ ALL_FEATURES = (
     features.LOB_WRITE_V1,
     features.MULTIPLE_RESULTS_V1,
     features.GENERATED_KEYS_V1,
+    features.PARTIAL_RESULTS_V1,
 )
 
 
@@ -111,7 +113,7 @@ class ContractService(
             server_version="test-server",
             features=ALL_FEATURES,
             capabilities=capability_pb2.Capabilities(
-                protocol_version=capability_pb2.ProtocolVersion(major=1, minor=1),
+                protocol_version=capability_pb2.ProtocolVersion(major=1, minor=2),
                 limits=capability_pb2.ProtocolLimits(
                     max_request_message_bytes=1024 * 1024,
                     max_response_message_bytes=1024 * 1024,
@@ -120,6 +122,8 @@ class ContractService(
                     max_lob_chunk_bytes=3,
                     max_array_dimensions=4,
                     max_lob_bytes=1024,
+                    max_warnings_per_execution=4,
+                    max_affected_resource_ids_per_warning=3,
                 ),
                 supported_types=[
                     capability_pb2.SupportedType(type=value_type, input=True, output=True)
@@ -163,10 +167,7 @@ class ContractService(
                 )
             )
             yield command_pb2.ExecuteResponse(
-                execution_end=command_pb2.ExecutionEnd(
-                    result_count=1,
-                    transaction=transaction,
-                )
+                execution_end=self._execution_end(request, transaction)
             )
             return
         yield command_pb2.ExecuteResponse(
@@ -184,10 +185,7 @@ class ContractService(
                 result_set_end=command_pb2.ResultSetEnd(result_id=1, row_count=0)
             )
             yield command_pb2.ExecuteResponse(
-                execution_end=command_pb2.ExecutionEnd(
-                    result_count=1,
-                    transaction=transaction,
-                )
+                execution_end=self._execution_end(request, transaction)
             )
             return
         yield command_pb2.ExecuteResponse(
@@ -228,6 +226,35 @@ class ContractService(
                     )
                 )
             )
+        if request.sql == "partial result":
+            yield command_pb2.ExecuteResponse(
+                result_set_end=command_pb2.ResultSetEnd(result_id=1, row_count=1)
+            )
+            yield command_pb2.ExecuteResponse(
+                execution_end=self._execution_end(
+                    request,
+                    transaction,
+                    completeness=command_pb2.EXECUTION_COMPLETENESS_PARTIAL,
+                    warnings=(
+                        warning_pb2.KublingWarning(
+                            stable_code="KBL_SOURCE_RESULT_OMITTED",
+                            message="One source could not contribute",
+                            sql_state="01000",
+                            role=warning_pb2.WARNING_ROLE_PARTIAL_RESULT_CAUSE,
+                            occurrence_count=2,
+                            affected_resource_ids=["source-1"],
+                            omitted_affected_resource_id_count=1,
+                            context=warning_pb2.WarningContext(
+                                result_id=1,
+                                model_id="inventory",
+                                source_id="source-1",
+                            ),
+                        ),
+                    ),
+                    omitted_warning_count=1,
+                )
+            )
+            return
         yield command_pb2.ExecuteResponse(
             result_rows=command_pb2.ResultRows(
                 result_id=1,
@@ -245,11 +272,38 @@ class ContractService(
             result_set_end=command_pb2.ResultSetEnd(result_id=1, row_count=2)
         )
         yield command_pb2.ExecuteResponse(
-            execution_end=command_pb2.ExecutionEnd(
-                result_count=1,
-                transaction=transaction,
+            execution_end=self._execution_end(
+                request,
+                transaction,
+                warnings=(
+                    warning_pb2.KublingWarning(
+                        stable_code="KBL_SOURCE_RETRIED",
+                        message="A source request recovered",
+                        role=warning_pb2.WARNING_ROLE_GENERAL,
+                        occurrence_count=1,
+                        vendor_code=0,
+                    ),
+                )
+                if request.sql == "general warning"
+                else (),
             )
         )
+
+    @staticmethod
+    def _execution_end(
+        request,
+        transaction,
+        *,
+        completeness=command_pb2.EXECUTION_COMPLETENESS_COMPLETE,
+        warnings=(),
+        omitted_warning_count=0,
+    ):
+        end = command_pb2.ExecutionEnd(result_count=1, transaction=transaction)
+        if features.PARTIAL_RESULTS_V1 in request.accepted_features:
+            end.completeness = completeness
+            end.warnings.extend(warnings)
+            end.omitted_warning_count = omitted_warning_count
+        return end
 
     def BeginTransaction(self, request, context):
         self.transaction_number += 1
@@ -387,6 +441,44 @@ def test_session_negotiates_capabilities_and_streams_typed_rows(session):
     assert service.execute_request.params[0].declared_type == integer
     assert ("kubling-affinity", "route-1") in service.execute_metadata
     assert service.login_request.password == "not-logged"
+
+
+def test_negotiated_terminal_outcome_preserves_warnings_and_partiality(session):
+    service, current = session
+
+    complete = list(
+        current.execute(
+            "general warning",
+            accepted_features=[features.PARTIAL_RESULTS_V1],
+        )
+    )[-1]
+
+    assert complete.completeness == command_pb2.EXECUTION_COMPLETENESS_COMPLETE
+    assert complete.warnings[0].stable_code == "KBL_SOURCE_RETRIED"
+    assert complete.warnings[0].vendor_code == 0
+    assert service.execute_request.allow_partial_results is False
+
+    with pytest.raises(CapabilityError, match="explicit"):
+        current.execute("partial result", allow_partial_results=True)
+
+    partial = list(
+        current.execute(
+            "partial result",
+            accepted_features=[features.PARTIAL_RESULTS_V1],
+            allow_partial_results=True,
+        )
+    )[-1]
+
+    assert partial.completeness == command_pb2.EXECUTION_COMPLETENESS_PARTIAL
+    assert partial.warnings[0].role == warning_pb2.WARNING_ROLE_PARTIAL_RESULT_CAUSE
+    assert partial.warnings[0].sql_state == "01000"
+    assert partial.warnings[0].occurrence_count == 2
+    assert partial.warnings[0].context.result_id == 1
+    assert partial.warnings[0].context.model_id == "inventory"
+    assert partial.warnings[0].affected_resource_ids == ("source-1",)
+    assert partial.warnings[0].omitted_affected_resource_id_count == 1
+    assert partial.omitted_warning_count == 1
+    assert service.execute_request.allow_partial_results is True
 
 
 def test_login_rejects_a_mismatched_vdb_version(contract_server):
@@ -563,4 +655,247 @@ def test_missing_execution_end_is_a_protocol_error():
 
     assert next(stream) == UpdateResult(1, (0,))
     with pytest.raises(ProtocolError, match="without ExecutionEnd"):
+        next(stream)
+
+
+def _stream_with_terminal_outcome(
+    end,
+    *,
+    accepted=True,
+    allow_partial_results=False,
+    max_warnings=4,
+    max_resource_ids=3,
+):
+    from kubling_sqlalchemy.transport.client import ExecutionStream
+
+    integer = type_descriptor(value_pb2.VALUE_TYPE_INTEGER)
+    responses = iter(
+        [
+            command_pb2.ExecuteResponse(
+                result_set_start=command_pb2.ResultSetStart(
+                    result_id=1,
+                    role=command_pb2.RESULT_SET_ROLE_QUERY,
+                    columns=[
+                        command_pb2.Column(
+                            name="id",
+                            data_type="integer",
+                            declared_type=integer,
+                        )
+                    ],
+                )
+            ),
+            command_pb2.ExecuteResponse(
+                result_set_end=command_pb2.ResultSetEnd(result_id=1, row_count=0)
+            ),
+            command_pb2.ExecuteResponse(execution_end=end),
+        ]
+    )
+    return ExecutionStream(
+        responses,
+        accepted_features=(
+            frozenset({features.PARTIAL_RESULTS_V1})
+            if accepted
+            else frozenset()
+        ),
+        supported_output_types=frozenset({value_pb2.VALUE_TYPE_INTEGER}),
+        max_array_dimensions=0,
+        max_response_message_bytes=4096,
+        max_batch_bytes=4096,
+        max_rows_per_batch=10,
+        allow_partial_results=allow_partial_results,
+        max_warnings_per_execution=max_warnings,
+        max_affected_resource_ids_per_warning=max_resource_ids,
+    )
+
+
+def _terminal_outcome(completeness, warnings=()):
+    return command_pb2.ExecutionEnd(
+        result_count=1,
+        transaction=transaction_pb2.TransactionStatus(
+            state=transaction_pb2.TRANSACTION_STATE_NONE
+        ),
+        completeness=completeness,
+        warnings=warnings,
+    )
+
+
+@pytest.mark.parametrize(
+    ("end", "accepted", "allow_partial_results", "message"),
+    [
+        (
+            _terminal_outcome(command_pb2.EXECUTION_COMPLETENESS_COMPLETE),
+            False,
+            False,
+            "without client acceptance",
+        ),
+        (
+            _terminal_outcome(command_pb2.EXECUTION_COMPLETENESS_UNSPECIFIED),
+            True,
+            False,
+            "unspecified or unknown",
+        ),
+        (
+            _terminal_outcome(
+                command_pb2.EXECUTION_COMPLETENESS_COMPLETE,
+                [
+                    warning_pb2.KublingWarning(
+                        stable_code="KBL_FUTURE_WARNING",
+                        message="Future role",
+                        role=99,
+                        occurrence_count=1,
+                    )
+                ],
+            ),
+            True,
+            False,
+            "role is unspecified or unknown",
+        ),
+        (
+            _terminal_outcome(
+                command_pb2.EXECUTION_COMPLETENESS_COMPLETE,
+                [
+                    warning_pb2.KublingWarning(
+                        stable_code="KBL_SOURCE_RESULT_OMITTED",
+                        message="A source was omitted",
+                        role=warning_pb2.WARNING_ROLE_PARTIAL_RESULT_CAUSE,
+                        occurrence_count=1,
+                    )
+                ],
+            ),
+            True,
+            True,
+            "COMPLETE execution contains",
+        ),
+        (
+            _terminal_outcome(
+                command_pb2.EXECUTION_COMPLETENESS_PARTIAL,
+                [
+                    warning_pb2.KublingWarning(
+                        stable_code="KBL_SOURCE_RESULT_OMITTED",
+                        message="A source was omitted",
+                        role=warning_pb2.WARNING_ROLE_PARTIAL_RESULT_CAUSE,
+                        occurrence_count=1,
+                    )
+                ],
+            ),
+            True,
+            False,
+            "without client authorization",
+        ),
+        (
+            _terminal_outcome(
+                command_pb2.EXECUTION_COMPLETENESS_PARTIAL,
+                [
+                    warning_pb2.KublingWarning(
+                        stable_code="KBL_SOURCE_RETRIED",
+                        message="A source recovered",
+                        role=warning_pb2.WARNING_ROLE_GENERAL,
+                        occurrence_count=1,
+                    )
+                ],
+            ),
+            True,
+            True,
+            "typed cause warning",
+        ),
+    ],
+)
+def test_terminal_outcome_rejects_inconsistent_combinations(
+    end,
+    accepted,
+    allow_partial_results,
+    message,
+):
+    stream = _stream_with_terminal_outcome(
+        end,
+        accepted=accepted,
+        allow_partial_results=allow_partial_results,
+    )
+
+    assert isinstance(next(stream), ResultSetStart)
+    assert isinstance(next(stream), ResultSetEnd)
+    with pytest.raises(ProtocolError, match=message):
+        next(stream)
+
+
+@pytest.mark.parametrize(
+    ("warning", "max_warnings", "max_resource_ids", "message"),
+    [
+        (
+            warning_pb2.KublingWarning(
+                stable_code="KBL_ZERO",
+                message="Invalid count",
+                role=warning_pb2.WARNING_ROLE_GENERAL,
+                occurrence_count=0,
+            ),
+            4,
+            3,
+            "occurrence_count",
+        ),
+        (
+            warning_pb2.KublingWarning(
+                stable_code="KBL_SQLSTATE",
+                message="Invalid SQLSTATE",
+                sql_state="timeout",
+                role=warning_pb2.WARNING_ROLE_GENERAL,
+                occurrence_count=1,
+            ),
+            4,
+            3,
+            "invalid SQLSTATE",
+        ),
+        (
+            warning_pb2.KublingWarning(
+                stable_code="KBL_IDS",
+                message="Too many resource IDs",
+                role=warning_pb2.WARNING_ROLE_GENERAL,
+                occurrence_count=1,
+                affected_resource_ids=["a", "b"],
+            ),
+            4,
+            1,
+            "affected resources",
+        ),
+    ],
+)
+def test_terminal_warning_enforces_negotiated_bounds(
+    warning,
+    max_warnings,
+    max_resource_ids,
+    message,
+):
+    end = _terminal_outcome(
+        command_pb2.EXECUTION_COMPLETENESS_COMPLETE,
+        [warning],
+    )
+    stream = _stream_with_terminal_outcome(
+        end,
+        max_warnings=max_warnings,
+        max_resource_ids=max_resource_ids,
+    )
+
+    next(stream)
+    next(stream)
+    with pytest.raises(ProtocolError, match=message):
+        next(stream)
+
+
+def test_terminal_warning_count_cannot_exceed_negotiated_limit():
+    warnings = [
+        warning_pb2.KublingWarning(
+            stable_code=f"KBL_{index}",
+            message="Warning",
+            role=warning_pb2.WARNING_ROLE_GENERAL,
+            occurrence_count=1,
+        )
+        for index in range(2)
+    ]
+    stream = _stream_with_terminal_outcome(
+        _terminal_outcome(command_pb2.EXECUTION_COMPLETENESS_COMPLETE, warnings),
+        max_warnings=1,
+    )
+
+    next(stream)
+    next(stream)
+    with pytest.raises(ProtocolError, match="warning count"):
         next(stream)

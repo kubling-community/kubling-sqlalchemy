@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codecs
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
@@ -16,6 +17,7 @@ from kubling.v1 import (
     lob_pb2_grpc,
     transaction_pb2,
     value_pb2,
+    warning_pb2,
 )
 
 from .codec import (
@@ -45,6 +47,7 @@ _ACCEPTABLE_OUTPUT_FEATURES = frozenset(
         features.LOB_READ_V1,
         features.MULTIPLE_RESULTS_V1,
         features.GENERATED_KEYS_V1,
+        features.PARTIAL_RESULTS_V1,
     }
 )
 
@@ -137,9 +140,32 @@ class TransactionStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class WarningContext:
+    result_id: int | None
+    model_id: str | None
+    source_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionWarning:
+    stable_code: str
+    message: str
+    role: int
+    occurrence_count: int
+    sql_state: str | None
+    vendor_code: int | None
+    context: WarningContext | None
+    affected_resource_ids: tuple[str, ...]
+    omitted_affected_resource_id_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionEnd:
     result_count: int
     transaction: TransactionStatus
+    completeness: int = command_pb2.EXECUTION_COMPLETENESS_UNSPECIFIED
+    warnings: tuple[ExecutionWarning, ...] = ()
+    omitted_warning_count: int = 0
 
 
 ExecutionEvent = ResultSetStart | ResultRows | UpdateResult | ResultSetEnd | ExecutionEnd
@@ -158,6 +184,9 @@ class ExecutionStream(Iterator[ExecutionEvent]):
         max_response_message_bytes: int,
         max_batch_bytes: int,
         max_rows_per_batch: int,
+        allow_partial_results: bool = False,
+        max_warnings_per_execution: int = 0,
+        max_affected_resource_ids_per_warning: int = 0,
     ) -> None:
         self._call = call
         self._accepted_features = accepted_features
@@ -166,12 +195,18 @@ class ExecutionStream(Iterator[ExecutionEvent]):
         self._max_response_message_bytes = max_response_message_bytes
         self._max_batch_bytes = max_batch_bytes
         self._max_rows_per_batch = max_rows_per_batch
+        self._allow_partial_results = allow_partial_results
+        self._max_warnings_per_execution = max_warnings_per_execution
+        self._max_affected_resource_ids_per_warning = (
+            max_affected_resource_ids_per_warning
+        )
         self._next_result_id = 1
         self._active_result_id: int | None = None
         self._active_columns: tuple[Column, ...] = ()
         self._active_rows = 0
         self._primary_results = 0
         self._update_results: set[int] = set()
+        self._query_results: set[int] = set()
         self._complete = False
         self._closed = False
         self.transaction: TransactionStatus | None = None
@@ -260,6 +295,7 @@ class ExecutionStream(Iterator[ExecutionEvent]):
             raise ProtocolError("query result cannot declare a parent result")
         else:
             self._claim_primary_result()
+            self._query_results.add(start.result_id)
 
         columns: list[Column] = []
         for source in start.columns:
@@ -343,6 +379,9 @@ class ExecutionStream(Iterator[ExecutionEvent]):
         if not end.HasField("transaction"):
             raise ProtocolError("ExecutionEnd requires transaction status")
         transaction = _decode_transaction_status(end.transaction)
+        completeness, warnings, omitted_warning_count = self._decode_execution_outcome(
+            end
+        )
 
         # The terminal event is not success until the stream also ends with gRPC OK.
         try:
@@ -350,11 +389,116 @@ class ExecutionStream(Iterator[ExecutionEvent]):
         except StopIteration:
             self._complete = True
             self.transaction = transaction
-            return ExecutionEnd(end.result_count, transaction)
+            return ExecutionEnd(
+                end.result_count,
+                transaction,
+                completeness,
+                warnings,
+                omitted_warning_count,
+            )
         except grpc.RpcError as exc:
             raise translate_rpc_error(exc) from exc
         raise ProtocolError(
             f"event {extra.WhichOneof('event') or 'unknown'} arrived after ExecutionEnd"
+        )
+
+    def _decode_execution_outcome(
+        self,
+        end: command_pb2.ExecutionEnd,
+    ) -> tuple[int, tuple[ExecutionWarning, ...], int]:
+        if features.PARTIAL_RESULTS_V1 not in self._accepted_features:
+            if (
+                end.completeness != command_pb2.EXECUTION_COMPLETENESS_UNSPECIFIED
+                or end.warnings
+                or end.omitted_warning_count
+            ):
+                raise ProtocolError(
+                    "server emitted partial_results_v1 without client acceptance"
+                )
+            return command_pb2.EXECUTION_COMPLETENESS_UNSPECIFIED, (), 0
+
+        if self._max_warnings_per_execution <= 0:
+            raise ProtocolError("partial_results_v1 requires a positive warning limit")
+        if self._max_affected_resource_ids_per_warning <= 0:
+            raise ProtocolError(
+                "partial_results_v1 requires a positive affected-resource limit"
+            )
+        if len(end.warnings) > self._max_warnings_per_execution:
+            raise ProtocolError("ExecutionEnd warning count exceeds the negotiated limit")
+
+        completeness = end.completeness
+        if completeness not in (
+            command_pb2.EXECUTION_COMPLETENESS_COMPLETE,
+            command_pb2.EXECUTION_COMPLETENESS_PARTIAL,
+        ):
+            raise ProtocolError("ExecutionEnd completeness is unspecified or unknown")
+
+        warnings = tuple(self._decode_warning(item) for item in end.warnings)
+        has_partial_cause = any(
+            item.role == warning_pb2.WARNING_ROLE_PARTIAL_RESULT_CAUSE
+            for item in warnings
+        )
+        if completeness == command_pb2.EXECUTION_COMPLETENESS_COMPLETE:
+            if has_partial_cause:
+                raise ProtocolError("COMPLETE execution contains a partial-result cause")
+        else:
+            if not self._allow_partial_results:
+                raise ProtocolError("server returned PARTIAL without client authorization")
+            if not self._query_results:
+                raise ProtocolError("PARTIAL execution requires a query result")
+            if not has_partial_cause:
+                raise ProtocolError("PARTIAL execution requires a typed cause warning")
+
+        return completeness, warnings, end.omitted_warning_count
+
+    def _decode_warning(self, item: warning_pb2.KublingWarning) -> ExecutionWarning:
+        if not item.stable_code or not item.message:
+            raise ProtocolError("execution warning requires a code and message")
+        if item.role not in (
+            warning_pb2.WARNING_ROLE_GENERAL,
+            warning_pb2.WARNING_ROLE_PARTIAL_RESULT_CAUSE,
+        ):
+            raise ProtocolError("execution warning role is unspecified or unknown")
+        if item.occurrence_count <= 0:
+            raise ProtocolError("execution warning occurrence_count must be positive")
+        if len(item.affected_resource_ids) > self._max_affected_resource_ids_per_warning:
+            raise ProtocolError(
+                "execution warning affected resources exceed the negotiated limit"
+            )
+        sql_state = item.sql_state if item.HasField("sql_state") else None
+        if sql_state is not None and re.fullmatch(r"[0-9A-Z]{5}", sql_state) is None:
+            raise ProtocolError("execution warning has an invalid SQLSTATE")
+        context = None
+        if item.HasField("context"):
+            context = WarningContext(
+                result_id=(
+                    item.context.result_id
+                    if item.context.HasField("result_id")
+                    else None
+                ),
+                model_id=(
+                    item.context.model_id
+                    if item.context.HasField("model_id")
+                    else None
+                ),
+                source_id=(
+                    item.context.source_id
+                    if item.context.HasField("source_id")
+                    else None
+                ),
+            )
+        return ExecutionWarning(
+            stable_code=item.stable_code,
+            message=item.message,
+            role=item.role,
+            occurrence_count=item.occurrence_count,
+            sql_state=sql_state,
+            vendor_code=item.vendor_code if item.HasField("vendor_code") else None,
+            context=context,
+            affected_resource_ids=tuple(item.affected_resource_ids),
+            omitted_affected_resource_id_count=(
+                item.omitted_affected_resource_id_count
+            ),
         )
 
     def _claim_result_id(self, result_id: int) -> None:
@@ -676,6 +820,7 @@ class KublingSession:
         batch_size: int = 0,
         return_generated_keys: bool = False,
         accepted_features: Iterable[str] = (),
+        allow_partial_results: bool = False,
         timeout: float | None = None,
     ) -> ExecutionStream:
         self._ensure_capabilities()
@@ -688,6 +833,12 @@ class KublingSession:
                 f"unsupported accepted_features: {sorted(unknown_acceptance)!r}"
             )
         self._require_features(accepted)
+        if type(allow_partial_results) is not bool:
+            raise ConfigurationError("allow_partial_results must be a bool")
+        if allow_partial_results and features.PARTIAL_RESULTS_V1 not in accepted:
+            raise CapabilityError(
+                "partial results require explicit partial_results_v1 acceptance"
+            )
         if return_generated_keys and features.GENERATED_KEYS_V1 not in accepted:
             raise CapabilityError(
                 "generated keys require explicit generated_keys_v1 acceptance"
@@ -716,6 +867,7 @@ class KublingSession:
             return_generated_keys=return_generated_keys,
             capability_id=capabilities.capability_id,
             accepted_features=sorted(accepted),
+            allow_partial_results=allow_partial_results,
         )
         request_limit = min(
             capabilities.limits.max_request_message_bytes,
@@ -743,6 +895,13 @@ class KublingSession:
             ),
             max_batch_bytes=capabilities.limits.max_batch_bytes,
             max_rows_per_batch=capabilities.limits.max_rows_per_batch,
+            allow_partial_results=allow_partial_results,
+            max_warnings_per_execution=(
+                capabilities.limits.max_warnings_per_execution
+            ),
+            max_affected_resource_ids_per_warning=(
+                capabilities.limits.max_affected_resource_ids_per_warning
+            ),
         )
 
     def begin_transaction(self, *, timeout: float | None = None) -> str:
@@ -1018,6 +1177,15 @@ class KublingSession:
         self._validate_affinity(capabilities)
         if features.ARRAY_VALUES_V1 in advertised and limits.max_array_dimensions <= 0:
             raise CapabilityError("array_values_v1 requires a positive dimension limit")
+        if features.PARTIAL_RESULTS_V1 in advertised:
+            if limits.max_warnings_per_execution <= 0:
+                raise CapabilityError(
+                    "partial_results_v1 requires a positive warning limit"
+                )
+            if limits.max_affected_resource_ids_per_warning <= 0:
+                raise CapabilityError(
+                    "partial_results_v1 requires a positive affected-resource limit"
+                )
         if advertised.intersection({features.LOB_READ_V1, features.LOB_WRITE_V1}):
             if limits.max_lob_chunk_bytes <= 0 or limits.max_lob_bytes <= 0:
                 raise CapabilityError("LOB features require positive size limits")
@@ -1241,6 +1409,7 @@ __all__ = [
     "ExecutionEnd",
     "ExecutionEvent",
     "ExecutionStream",
+    "ExecutionWarning",
     "GrpcConfig",
     "KublingGrpcClient",
     "KublingSession",
@@ -1251,4 +1420,5 @@ __all__ = [
     "TlsConfig",
     "TransactionStatus",
     "UpdateResult",
+    "WarningContext",
 ]

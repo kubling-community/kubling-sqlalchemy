@@ -61,8 +61,8 @@ def inspect_wheel(wheel: Path, version: str) -> None:
         requirements = metadata.get_all("Requires-Dist", [])
         if not any(item.startswith("SQLAlchemy<2.1,>=2.0.36") for item in requirements):
             raise ValueError("wheel SQLAlchemy requirement is incorrect")
-        if "kubling-grpc[status]==1.1.1" not in requirements:
-            raise ValueError("wheel must pin kubling-grpc[status] 1.1.1")
+        if "kubling-grpc[status]==1.2.0" not in requirements:
+            raise ValueError("wheel must pin kubling-grpc[status] 1.2.0")
         entry_points = archive.read(entry_names[0]).decode("utf-8")
         for name in ("kubling =", "kubling.grpc ="):
             if name not in entry_points:

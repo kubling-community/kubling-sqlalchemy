@@ -10,6 +10,7 @@ from kubling_sqlalchemy.transport import (
     CodecError,
     Column,
     ExecutionEnd,
+    ExecutionWarning,
     ExecutionStream,
     KublingLocalTime,
     KublingLocalTimestamp,
@@ -56,6 +57,9 @@ class Cursor:
         self._failure: Error | None = None
         self._arraysize = 1
         self._transaction_id = ""
+        self._completeness: int | None = None
+        self._warnings: tuple[ExecutionWarning, ...] = ()
+        self._omitted_warning_count = 0
 
     @property
     def connection(self):
@@ -93,6 +97,18 @@ class Cursor:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def completeness(self) -> int | None:
+        return self._completeness
+
+    @property
+    def warnings(self) -> tuple[ExecutionWarning, ...]:
+        return self._warnings
+
+    @property
+    def omitted_warning_count(self) -> int:
+        return self._omitted_warning_count
+
     def execute(self, operation: str, parameters: Sequence[Any] | None = None) -> "Cursor":
         with self._connection._lock:
             self._ensure_open()
@@ -110,6 +126,7 @@ class Cursor:
                     transaction_id=transaction_id,
                     batch_size=self._arraysize,
                     accepted_features=self._connection._accepted_output_features,
+                    allow_partial_results=self._connection.allow_partial_results,
                 )
                 self._result_complete = False
                 self._read_initial_result()
@@ -238,6 +255,9 @@ class Cursor:
 
     def _finish(self, event: ExecutionEnd) -> None:
         self._connection._observe_execution_end(event, self._transaction_id)
+        self._completeness = event.completeness
+        self._warnings = event.warnings
+        self._omitted_warning_count = event.omitted_warning_count
         self._result_complete = True
         self._stream = None
         self._connection._release_execution(self)
@@ -270,6 +290,9 @@ class Cursor:
         self._rowcount = -1
         self._result_set = False
         self._failure = None
+        self._completeness = None
+        self._warnings = ()
+        self._omitted_warning_count = 0
 
     def _reset_result(self) -> None:
         self._discard_pending()
@@ -279,6 +302,9 @@ class Cursor:
         self._result_set = False
         self._failure = None
         self._transaction_id = ""
+        self._completeness = None
+        self._warnings = ()
+        self._omitted_warning_count = 0
 
     def _close_from_connection(self) -> None:
         if self._closed:

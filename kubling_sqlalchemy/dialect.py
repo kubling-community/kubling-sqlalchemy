@@ -274,6 +274,9 @@ class KublingDialect(KublingReflectionMixin, DefaultDialect):
 
         insecure = _pop_bool(query, "insecure", default=False)
         wait_for_ready = _pop_bool(query, "wait_for_ready", default=True)
+        allow_partial_results = _pop_bool(
+            query, "allow_partial_results", default=False
+        )
         root_certificates = _pop_file(query, "ca_file")
         private_key = _pop_file(query, "client_key_file")
         certificate_chain = _pop_file(query, "client_cert_file")
@@ -321,6 +324,7 @@ class KublingDialect(KublingReflectionMixin, DefaultDialect):
             ),
             "rpc_timeout_seconds": _pop_float(query, "rpc_timeout", default=30.0),
             "wait_for_ready": wait_for_ready,
+            "allow_partial_results": allow_partial_results,
             "max_send_message_bytes": _pop_int(
                 query, "max_send_message_bytes", default=16 * 1024 * 1024
             ),

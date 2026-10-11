@@ -3,7 +3,13 @@ from concurrent import futures
 import grpc
 import pytest
 from kubling import features
-from kubling.v1 import command_pb2_grpc, lob_pb2_grpc, transaction_pb2, value_pb2
+from kubling.v1 import (
+    command_pb2,
+    command_pb2_grpc,
+    lob_pb2_grpc,
+    transaction_pb2,
+    value_pb2,
+)
 
 from kubling_sqlalchemy import dbapi
 
@@ -68,10 +74,37 @@ def test_dbapi_connect_execute_fetch_and_commit_use_official_services(
         features.ARRAY_VALUES_V1,
         features.SPATIAL_VALUES_V1,
         features.LOB_READ_V1,
+        features.PARTIAL_RESULTS_V1,
     }
+    assert service.execute_request.allow_partial_results is False
+    assert cursor.completeness == command_pb2.EXECUTION_COMPLETENESS_COMPLETE
+    assert cursor.warnings == ()
 
     connection.commit()
     assert connection.transaction_id is None
+
+
+def test_dbapi_partial_results_are_explicit_and_structured(dbapi_server):
+    service, endpoint = dbapi_server
+    connection = dbapi.connect(
+        endpoint,
+        tls=None,
+        vdb_name="test-vdb",
+        username="alice",
+        password="not-logged",
+        allow_partial_results=True,
+    )
+    try:
+        cursor = connection.cursor().execute("partial result")
+
+        assert cursor.fetchall() == [(1, "one")]
+        assert cursor.completeness == command_pb2.EXECUTION_COMPLETENESS_PARTIAL
+        assert cursor.warnings[0].stable_code == "KBL_SOURCE_RESULT_OMITTED"
+        assert cursor.warnings[0].affected_resource_ids == ("source-1",)
+        assert cursor.omitted_warning_count == 1
+        assert service.execute_request.allow_partial_results is True
+    finally:
+        connection.close()
 
 
 def test_dbapi_updates_and_successive_transactions_use_explicit_ids(connection):

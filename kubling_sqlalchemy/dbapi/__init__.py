@@ -92,6 +92,7 @@ def connect(
     application_name: str = "kubling-dbapi",
     properties: dict[str, str] | None = None,
     autocommit: bool = False,
+    allow_partial_results: bool = False,
 ) -> Connection:
     """Open one authenticated Kubling session and return its DB-API connection."""
 
@@ -101,6 +102,8 @@ def connect(
         raise InterfaceError("vdb_name must be a non-empty string")
     if type(autocommit) is not bool:
         raise InterfaceError("autocommit must be a bool")
+    if type(allow_partial_results) is not bool:
+        raise InterfaceError("allow_partial_results must be a bool")
     try:
         config = GrpcConfig(
             endpoint=endpoint,
@@ -127,7 +130,12 @@ def connect(
     except Exception as exc:
         client.close()
         raise translate_exception(exc) from exc
-    return Connection(client, session, autocommit=autocommit)
+    return Connection(
+        client,
+        session,
+        autocommit=autocommit,
+        allow_partial_results=allow_partial_results,
+    )
 
 
 def Date(year: int, month: int, day: int) -> date:

@@ -98,6 +98,7 @@ Supported connection options are:
 | `connect_timeout` | Channel/login timeout in seconds | `10` |
 | `rpc_timeout` | RPC timeout in seconds | `30` |
 | `wait_for_ready` | Wait for the channel when `true` | `true` |
+| `allow_partial_results` | Return explicitly marked incomplete query results | `false` |
 | `max_send_message_bytes` | Maximum outbound gRPC message size | `16777216` |
 | `max_receive_message_bytes` | Maximum inbound gRPC message size | `67108864` |
 | `application_name` | Client name sent at login | `kubling-sqlalchemy` |
@@ -136,6 +137,11 @@ finally:
 The driver uses DB-API 2.0 `qmark` parameters. Transactions begin lazily unless
 `autocommit=True`. A connection permits one unfinished result stream at a time;
 closing its cursor cancels that stream and releases the connection.
+
+The driver validates terminal completeness and warnings when the server supports
+them. Results stay strict by default. With `allow_partial_results=true`, drain the
+result and inspect `cursor.completeness`, `cursor.warnings` and
+`cursor.omitted_warning_count` before treating the data as complete.
 
 ## Types
 
