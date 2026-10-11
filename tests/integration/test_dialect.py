@@ -38,7 +38,10 @@ def test_native_dialect_connects_and_exposes_server_version(engine):
     assert engine.dialect.dbapi is dbapi
 
     with engine.connect() as connection:
-        assert connection.dialect.server_version_info == (26, 2)
+        server_version = connection.dialect.server_version_info
+        assert server_version
+        assert all(isinstance(part, int) for part in server_version)
+        assert connection.connection.dbapi_connection.server_version
         assert connection.default_isolation_level == "KUBLING DEFAULT"
         assert connection.connection.dbapi_connection.ping() is True
 

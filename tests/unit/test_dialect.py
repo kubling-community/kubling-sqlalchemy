@@ -81,12 +81,21 @@ def test_url_requires_explicit_grpc_endpoint_and_preserves_credentials():
         "tls": None,
         "connect_timeout_seconds": 4.5,
         "rpc_timeout_seconds": 9.0,
-        "wait_for_ready": False,
+            "wait_for_ready": False,
+            "allow_partial_results": False,
         "max_send_message_bytes": 1024,
         "max_receive_message_bytes": 2048,
         "application_name": "unit",
         "properties": {"role": "reader"},
-    }
+        }
+
+    _, partial = dialect.create_connect_args(
+        make_url(
+            "kubling://u:p@host:55051/VDB"
+            "?insecure=true&allow_partial_results=true"
+        )
+    )
+    assert partial["allow_partial_results"] is True
 
     with pytest.raises(exc.ArgumentError, match="explicit port"):
         dialect.create_connect_args(make_url("kubling://u:p@host/VDB"))

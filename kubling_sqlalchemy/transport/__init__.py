@@ -5,6 +5,7 @@ from .client import (
     ExecutionEnd,
     ExecutionEvent,
     ExecutionStream,
+    ExecutionWarning,
     GrpcConfig,
     KublingGrpcClient,
     KublingSession,
@@ -15,6 +16,7 @@ from .client import (
     TlsConfig,
     TransactionStatus,
     UpdateResult,
+    WarningContext,
 )
 from .codec import (
     BoundParameter,
@@ -53,6 +55,7 @@ __all__ = [
     "ExecutionEnd",
     "ExecutionEvent",
     "ExecutionStream",
+    "ExecutionWarning",
     "GrpcConfig",
     "KublingArray",
     "KublingBlob",
@@ -77,6 +80,7 @@ __all__ = [
     "TlsConfig",
     "TransactionStatus",
     "UpdateResult",
+    "WarningContext",
     "decode_value",
     "encode_parameter",
     "encode_value",

@@ -35,6 +35,7 @@ _DBAPI_OUTPUT_FEATURES = frozenset(
         features.ARRAY_VALUES_V1,
         features.SPATIAL_VALUES_V1,
         features.LOB_READ_V1,
+        features.PARTIAL_RESULTS_V1,
     }
 )
 
@@ -48,12 +49,16 @@ class Connection:
         session: KublingSession,
         *,
         autocommit: bool = False,
+        allow_partial_results: bool = False,
     ) -> None:
         if type(autocommit) is not bool:
             raise InterfaceError("autocommit must be a bool")
+        if type(allow_partial_results) is not bool:
+            raise InterfaceError("allow_partial_results must be a bool")
         self._client = client
         self._session = session
         self._autocommit = autocommit
+        self._allow_partial_results = allow_partial_results
         self._closed = False
         self._lock = RLock()
         self._cursors: set[Cursor] = set()
@@ -234,6 +239,10 @@ class Connection:
     @property
     def _accepted_output_features(self) -> frozenset[str]:
         return _DBAPI_OUTPUT_FEATURES.intersection(self._session.advertised_features)
+
+    @property
+    def allow_partial_results(self) -> bool:
+        return self._allow_partial_results
 
     def __enter__(self) -> "Connection":
         self._ensure_open()

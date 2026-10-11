@@ -20,7 +20,7 @@ Example:
 ```bash
 gh workflow run python.yml \
   --ref master \
-  -f tag=v26.2.0 \
+  -f tag=vX.Y.Z \
   -f publish=true
 ```
 
